@@ -68,6 +68,51 @@ export class PoprProvider extends BaseProvider {
         }
     }
 
+    private async checkStreamType(
+        url: string,
+        headers: Record<string, string> = {}
+    ): Promise<{ isValid: boolean; type: SourceType }> {
+        try {
+            const res = await fetch(url, {
+                headers: { ...this.HEADERS, ...headers },
+                signal: AbortSignal.timeout(5000),
+                redirect: 'follow'
+            });
+            if (!res.ok) return { isValid: false, type: 'mp4' };
+
+            const contentType = res.headers.get('content-type') || '';
+            if (
+                contentType.includes('video/mp4') ||
+                contentType.includes('video/webm')
+            ) {
+                return { isValid: true, type: 'mp4' };
+            }
+
+            const text = await res.text();
+            const trimmed = text.trim();
+
+            if (trimmed.startsWith('#EXTM3U')) {
+                const segmentLines = trimmed.split('\n').filter((l) => {
+                    const t = l.trim();
+                    return t && !t.startsWith('#');
+                });
+                return { isValid: segmentLines.length > 0, type: 'hls' };
+            }
+
+            
+            if (
+                trimmed.toLowerCase().includes('<!doctype html>') ||
+                trimmed.toLowerCase().includes('<html')
+            ) {
+                return { isValid: false, type: 'mp4' };
+            }
+
+            return { isValid: true, type: 'mp4' };
+        } catch {
+            return { isValid: false, type: 'mp4' };
+        }
+    }
+
     // https://popr.ink/api/vidnest?id=262848&type=tv&server=catflix&season=1&episode=1
     private async fetchSource(
         media: ProviderMediaObject,
@@ -110,24 +155,32 @@ export class PoprProvider extends BaseProvider {
                         const stream = data?.results?.[0]?.streams?.[0];
                         if (!stream?.url) return null;
 
-                        const ext = (new URL(stream.url).pathname.match(
-                            /\.[^./]+$/
-                        ) || [''])[0];
+                        const streamHeaders = stream.headers || {};
+                        const { isValid, type } = await this.checkStreamType(
+                            stream.url,
+                            streamHeaders
+                        );
+
+                        if (!isValid) return null;
 
                         const quality = stream.quality;
                         const INVALID_QUALITIES = ['Hindi', 'English', 'MAIN'];
                         const QUALITIES = ['Hindi', 'English'];
                         const languages = QUALITIES.includes(quality);
 
+                        
+                        const proxyHeaders = {
+                            ...this.HEADERS,
+                            ...streamHeaders
+                        };
+
                         return {
                             source: {
                                 url: this.createProxyUrl(
                                     stream.url,
-                                    stream.headers
+                                    proxyHeaders
                                 ),
-                                type: (ext === '.m3u8'
-                                    ? 'hls'
-                                    : 'mp4') as SourceType,
+                                type,
                                 quality: INVALID_QUALITIES.includes(quality)
                                     ? 'auto'
                                     : quality || 'auto',
